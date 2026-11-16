@@ -1,0 +1,65 @@
+plugins { id("com.android.application") }
+
+// Release signing: keystore.properties OUTSIDE the repo (storeFile, storePassword, keyAlias, keyPassword).
+// Looked up via SLOWWAVE_KEYSTORE_PROPS, then ~/slowwave-signing/keystore.properties.
+// Without it, assembleRelease produces an unsigned APK.
+def ksPropsPath = System.getenv("SLOWWAVE_KEYSTORE_PROPS") ?: "${System.getProperty('user.home')}/slowwave-signing/keystore.properties"
+def ksProps = new Properties()
+def ksFile = file(ksPropsPath)
+if (ksFile.exists()) ksFile.withInputStream { ksProps.load(it) }
+
+// The UI lives in ../web (shared with the iPad web app); copy it into the APK's assets.
+def syncWeb = tasks.register("syncWeb", Sync) {
+  from("${rootDir}/../web") { exclude "sw.js", "manifest.webmanifest" }
+  into("${buildDir}/generated/webassets/www")
+}
+
+android {
+  namespace "com.mildsolvent.slowwave"
+  compileSdk 35
+
+  defaultConfig {
+    applicationId "com.mildsolvent.slowwave"
+    minSdk 26
+    targetSdk 35
+    versionCode 1
+    versionName "0.1.0"
+  }
+
+  sourceSets { main { assets.srcDirs += ["${buildDir}/generated/webassets"] } }
+
+  signingConfigs {
+    if (ksProps.storeFile) {
+      release {
+        storeFile file(ksProps.storeFile)
+        storePassword ksProps.storePassword
+        keyAlias ksProps.keyAlias
+        keyPassword ksProps.keyPassword
+      }
+    }
+  }
+
+  buildTypes {
+    release {
+      minifyEnabled false
+      if (ksProps.storeFile) signingConfig signingConfigs.release
+    }
+  }
+
+  buildFeatures { buildConfig true }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  applicationVariants.all { variant ->
+    variant.outputs.all { output ->
+      outputFileName = "Slowwave-${variant.versionName}-android${variant.buildType.name == 'debug' ? '-debug' : ''}.apk"
+    }
+  }
+}
+
+tasks.named("preBuild") { dependsOn(syncWeb) }
+
+dependencies { }
