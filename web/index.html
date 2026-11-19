@@ -24,7 +24,7 @@
       <div class="brand"><span class="dot"></span>slowwave</div>
       <div class="top-actions">
         <button class="icon-btn" id="btn-log" aria-label="Nights">☾</button>
-        <button class="icon-btn" id="btn-about" aria-label="What this is">i</button>
+        <button class="icon-btn" id="btn-about" aria-label="How it works">i</button>
       </div>
     </header>
 
@@ -145,7 +145,6 @@
     </section>
 
     <button class="start" id="btn-start">Start night</button>
-    <p class="foot">An experiment, not a treatment. <button class="link" id="btn-about2">What this can and can't do</button></p>
   </main>
 
   <!-- ===== night screen ===== -->
@@ -164,23 +163,25 @@
   <!-- ===== sheets ===== -->
   <div class="scrim hidden" id="scrim"></div>
 
-  <section class="sheet hidden" id="sheet-about" aria-label="What this is">
+  <section class="sheet hidden" id="sheet-about" aria-label="How it works">
     <div class="grab"></div>
-    <h2>What this is</h2>
-    <p>In September 2026, an MIT team (Levitt, Lewis et al., <i>Science Translational Medicine</i>) played 50&nbsp;ms bursts of pink noise to 14 sleeping adults. The bursts were timed to land on the peak of each slow brain wave in deep sleep, and they made those waves, and the flow of brain fluid (CSF) that goes with them, stronger.</p>
-    <h3>What this app can't do</h3>
-    <p>The timing was the whole trick. They read the brain waves live with EEG and fired the sound at the right moment. A phone can't see your brain waves, so this app <b>can't hit the peaks</b>, and it can't know when you're actually in deep sleep. The researchers themselves say there's no evidence plain continuous pink noise does the same thing, and another study found all-night steady noise cut REM sleep.</p>
-    <h3>What it does instead</h3>
+    <h2>How it works</h2>
+    <p>In deep sleep your brain makes big, slow waves, about one a second, and each one comes with a pulse of brain fluid (CSF) washing through. In September 2026 an MIT team (Levitt, Lewis et al., <i>Science Translational Medicine</i>) played 50&nbsp;ms bursts of pink noise to sleeping people, and the bursts made those slow waves, and the fluid flow that follows them, stronger.</p>
+    <h3>What Slowwave plays</h3>
     <ul>
-      <li>Short, soft 50&nbsp;ms pink noise bursts, same sound as the study.</li>
-      <li>Only in the first hours after you fall asleep, where most deep sleep usually sits.</li>
-      <li><b>Rhythm</b>: groups of 5 bursts at about 0.8 per second, the pace of slow waves (older no-EEG studies used rhythms like this, with weaker, mixed results). <b>Pairs</b>: 2 bursts, then a long rest, closer to the study's sparse style.</li>
-      <li>Then it goes silent and stops by itself, so the REM-heavy morning is left alone.</li>
+      <li>The same sound: short, soft 50&nbsp;ms bursts of pink noise.</li>
+      <li>Only after you've fallen asleep, in the first hours of the night, when most deep sleep happens.</li>
+      <li><b>Rhythm</b>: groups of 5 bursts at slow-wave pace (about 0.8 per second). <b>Pairs</b>: 2 bursts, then a long rest.</li>
+      <li>Then silence for the rest of the night, so the dream-heavy morning sleep is left alone.</li>
+      <li><b>Nap</b>: the same in short, with a gentle alarm at the end.</li>
     </ul>
-    <h3>So treat it like</h3>
-    <p>A fun self-experiment. Blind test mode helps you tell a real effect from a good-mood effect. If a burst ever wakes you, turn it down. Not medical advice, not a cure for anything.</p>
+    <h3>Getting the most out of it</h3>
+    <ul>
+      <li>Keep the bursts quiet: just loud enough to hear while you lie awake. If one ever wakes you, turn it down.</li>
+      <li>Rate your mornings. With <b>Blind test</b> on, some nights are silent and you only find out after rating, so you can see what the bursts really do for you.</li>
+    </ul>
     <h3>Later</h3>
-    <p>There's a hook for an EEG headband. With one, the app could do the real closed-loop thing.</p>
+    <p>There's a hook for an EEG headband, which could fire each burst right on the peak of a slow wave, like in the study.</p>
     <p class="muted small">Source: MIT News, 9 Sep 2026, "A pink noise burst may mean more restorative sleep".</p>
     <button class="pill wide" data-close>Got it</button>
   </section>

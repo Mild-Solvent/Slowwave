@@ -47,7 +47,7 @@ async function waitReady(p) {
   const p = await cdpPage(9222);
   const errs = p.errs;
   check('native engine in APK', await p.evaluate(() => Engine.kind === 'android'));
-  check('version reported', await p.evaluate(() => Engine.version()) === '0.2.0');
+  check('version reported', await p.evaluate(() => Engine.version()) === '0.2.1');
   check('setup screen visible', await p.evaluate(() => !document.getElementById('setup').classList.contains('hidden')));
   check('keep-screen row hidden on Android', await p.evaluate(() => document.getElementById('screen-row').classList.contains('hidden')));
   const w = await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
