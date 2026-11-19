@@ -96,7 +96,6 @@
     });
     $('btn-start').addEventListener('click', startNight);
     $('btn-about').addEventListener('click', () => openSheet('sheet-about'));
-    $('btn-about2').addEventListener('click', () => openSheet('sheet-about'));
     $('btn-log').addEventListener('click', () => { renderLog(); openSheet('sheet-log'); });
     $('scrim').addEventListener('click', closeSheets);
     document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', closeSheets));
