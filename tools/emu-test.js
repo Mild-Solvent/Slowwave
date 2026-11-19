@@ -113,7 +113,8 @@ async function waitReady(p) {
   const nr = await p.evaluate(c => Engine.start(c), nc);
   check('nap starts', nr.ok === true, JSON.stringify(nr));
   check('nap plan: alarm 72 s after bursts start', nr.plan.wakeAt - nr.plan.burstStart === 72000 && nr.plan.wakeAt - nr.plan.burstEnd === 12000, JSON.stringify(nr.plan));
-  const alarms = adb('shell dumpsys alarm');
+  const pendingAlarms = () => adb('shell dumpsys alarm').split('Pending user blocked background alarms')[0]; // skip the history of fired alarms
+  const alarms = pendingAlarms();
   check('real alarm clock scheduled', /com\.mildsolvent\.slowwave/.test(alarms) && /slowwave\.WAKE/.test(alarms));
   adb('shell input keyevent 26'); // screen off for the whole nap
   while (Date.now() < nr.plan.burstEnd + 3000) await sleep(1000);
@@ -125,7 +126,10 @@ async function waitReady(p) {
   check('alarm rings with the screen off', s.state === 'waking', s.state);
   const au = adb('shell dumpsys audio');
   check('alarm plays on the alarm stream', /USAGE_ALARM/.test(au.split('players:')[1] || au));
-  await sleep(1500); shot('04-alarm-ringing');
+  await sleep(1500);
+  check('alarm turns the screen on', /mWakefulness=Awake/.test(adb('shell dumpsys power')));
+  check('app shows over the lock screen while ringing', /mResumedActivity.*slowwave|topResumedActivity.*slowwave/.test(adb('shell dumpsys activity activities')));
+  shot('04-alarm-ringing');
   await p.evaluate(() => Engine.stop());
   await sleep(1500);
   const ln = await p.evaluate(() => Engine.peekLastSession());

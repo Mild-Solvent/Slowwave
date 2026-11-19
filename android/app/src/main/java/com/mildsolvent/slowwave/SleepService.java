@@ -39,7 +39,7 @@ public class SleepService extends Service {
     static final String ACTION_WAKE = "com.mildsolvent.slowwave.WAKE";
     private static final String CHANNEL = "night";
     private static final String CHANNEL_ALARM = "alarm";
-    private static final int NOTIF_ID = 7;
+    private static final int NOTIF_ID = 7, ALARM_NOTIF_ID = 8; // a fresh id for the alarm so its full-screen intent fires
     static final String PREFS = "slowwave";
 
     // ----- shared session state (one at a time) -----
@@ -241,6 +241,7 @@ public class SleepService extends Service {
         long now = System.currentTimeMillis();
         if (ACTION_WAKE.equals(action) || isRinging()) {
             holdWakeLock(endWall - now + 60_000L);
+            lightScreen();
             if (alarmThread == null || !alarmThread.isAlive()) {
                 alarmThread = new Thread(this::ring, "slowwave-alarm");
                 alarmThread.setPriority(Thread.MAX_PRIORITY);
@@ -263,6 +264,16 @@ public class SleepService extends Service {
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "slowwave:night");
         wakeLock.acquire(Math.max(60_000L, ms));
+    }
+
+    /** Turn the screen on when the alarm starts (the full-screen intent then shows the app over the lock screen). */
+    @SuppressWarnings("deprecation")
+    private void lightScreen() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                    "slowwave:alarm-screen").acquire(15_000L);
+        } catch (Exception ignored) { }
     }
 
     private void releaseWakeLock() {
@@ -449,8 +460,10 @@ public class SleepService extends Service {
                             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT), true);
         }
         Notification n = b.build();
-        if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        else startForeground(NOTIF_ID, n);
+        int id = ringing ? ALARM_NOTIF_ID : NOTIF_ID;
+        if (Build.VERSION.SDK_INT >= 29) startForeground(id, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        else startForeground(id, n);
+        if (ringing) nm.cancel(NOTIF_ID);
     }
 
     @Override
