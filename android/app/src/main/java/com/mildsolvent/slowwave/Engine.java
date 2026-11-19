@@ -55,6 +55,29 @@ final class Engine {
         return out;
     }
 
+    /** Alarm: a four-note chime every 4 s, rising from -32 to -10 dBFS over 90 s. Mirror of engine-web.js. */
+    static final int CHIME_PERIOD_MS = 4000;
+    static float alarmGain(long elapsedMs) { return (float) Math.pow(10, (-32 + 22 * Math.min(1.0, elapsedMs / 90000.0)) / 20.0); }
+
+    static float[] renderChime() {
+        double[][] notes = {{523.25, 0}, {659.25, 0.28}, {783.99, 0.56}, {1046.5, 0.84}};
+        int n = (int) Math.round(RATE * 2.8);
+        float[] out = new float[n];
+        for (double[] nt : notes) {
+            double f = nt[0], at = nt[1];
+            for (int i = (int) Math.round(at * RATE); i < n; i++) {
+                double t = (double) i / RATE - at, env = t < 0.008 ? t / 0.008 : Math.exp(-(t - 0.008) / 0.5);
+                out[i] += (float) (env * (Math.sin(2 * Math.PI * f * t) + 0.3 * Math.sin(4 * Math.PI * f * t)));
+            }
+        }
+        float peak = 1e-9f;
+        for (float v : out) peak = Math.max(peak, Math.abs(v));
+        for (int i = 0; i < n; i++) out[i] /= peak;
+        int fade = RATE / 20;
+        for (int i = 0; i < fade; i++) out[n - 1 - i] *= (float) i / fade;
+        return out;
+    }
+
     static short toPcm(float v) {
         if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
         return (short) Math.round(v * 32767f);

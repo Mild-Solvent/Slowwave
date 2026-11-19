@@ -84,6 +84,14 @@ input[type=range]::-moz-range-thumb { width: 20px; height: 20px; border-radius: 
 .chips button { padding: 8px 14px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 .chips button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 
+/* night / nap */
+.modes { display: grid; grid-template-columns: 1fr 1fr; margin: 0; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; }
+.modes button { margin: 0; padding: 10px 0; border: 0; background: transparent; font-size: 15px; }
+.mode-nap .night-only, body:not(.mode-nap) .nap-only { display: none !important; }
+.seg-wake { background: var(--warn); color: var(--accent-ink); flex: none; width: 30px; }
+.seg-wake span { padding: 0; }
+.time { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 8px 10px; font: inherit; font-size: 17px; color-scheme: dark; }
+
 /* switch */
 .toggle-row { grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 14px; }
 .switch { width: 50px; height: 30px; border-radius: 15px; background: var(--line); position: relative; flex: none; transition: background .2s; margin-top: 2px; }
@@ -127,6 +135,13 @@ input[type=range]::-moz-range-thumb { width: 20px; height: 20px; border-radius: 
 .hold-fill { position: absolute; inset: 0; width: 0; background: #2a1b22; }
 .hold.holding .hold-fill { width: 100%; transition: width 1.2s linear; }
 .hold-label { position: relative; }
+
+/* alarm ringing */
+.night.waking .night-inner { opacity: 1; }
+.night.waking .phase { color: var(--warn); }
+.night.waking .big { color: var(--text); }
+.night.waking .hold { background: var(--accent-dim); color: #f6dce6; border-color: var(--accent); }
+.night.waking .hold-fill { background: var(--accent); }
 
 /* sheets */
 .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }

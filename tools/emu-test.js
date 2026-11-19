@@ -47,7 +47,7 @@ async function waitReady(p) {
   const p = await cdpPage(9222);
   const errs = p.errs;
   check('native engine in APK', await p.evaluate(() => Engine.kind === 'android'));
-  check('version reported', await p.evaluate(() => Engine.version()) === '0.1.0');
+  check('version reported', await p.evaluate(() => Engine.version()) === '0.2.0');
   check('setup screen visible', await p.evaluate(() => !document.getElementById('setup').classList.contains('hidden')));
   check('keep-screen row hidden on Android', await p.evaluate(() => document.getElementById('screen-row').classList.contains('hidden')));
   const w = await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
@@ -106,6 +106,40 @@ async function waitReady(p) {
   check('hold stops', s.state === 'idle', s.state);
   const last2 = await p.evaluate(() => Engine.peekLastSession());
   check('stopped recorded', last2 && last2.endedBy === 'stopped');
+  await p.evaluate(() => { document.getElementById('morning-skip').click(); });
+
+  // nap with alarm: 6 s to fall asleep, 72 s nap (bursts 60 s, quiet 12 s), alarm rings up to 30 s
+  const nc = Object.assign({}, cfg, { session: 'nap', napDelayMin: 0.1, napMin: 1.2, alarmMin: 0.5, lull: false, blind: false, pattern: 'rhythm' });
+  const nr = await p.evaluate(c => Engine.start(c), nc);
+  check('nap starts', nr.ok === true, JSON.stringify(nr));
+  check('nap plan: alarm 72 s after bursts start', nr.plan.wakeAt - nr.plan.burstStart === 72000 && nr.plan.wakeAt - nr.plan.burstEnd === 12000, JSON.stringify(nr.plan));
+  const alarms = adb('shell dumpsys alarm');
+  check('real alarm clock scheduled', /com\.mildsolvent\.slowwave/.test(alarms) && /slowwave\.WAKE/.test(alarms));
+  adb('shell input keyevent 26'); // screen off for the whole nap
+  while (Date.now() < nr.plan.burstEnd + 3000) await sleep(1000);
+  s = await p.evaluate(() => Engine.status());
+  check('quiet after the nap bursts', s.state === 'quiet', s.state + ' blocks=' + s.blocks);
+  check('nap played bursts', s.blocks >= 3, String(s.blocks));
+  while (Date.now() < nr.plan.wakeAt + 5000) await sleep(1000);
+  s = await p.evaluate(() => Engine.status());
+  check('alarm rings with the screen off', s.state === 'waking', s.state);
+  const au = adb('shell dumpsys audio');
+  check('alarm plays on the alarm stream', /USAGE_ALARM/.test(au.split('players:')[1] || au));
+  await sleep(1500); shot('04-alarm-ringing');
+  await p.evaluate(() => Engine.stop());
+  await sleep(1500);
+  const ln = await p.evaluate(() => Engine.peekLastSession());
+  check('stopping the alarm records woke', ln && ln.endedBy === 'woke', ln && ln.endedBy);
+  check('alarm clock cleared', !/slowwave\.WAKE/.test(adb('shell dumpsys alarm')));
+  check('service gone after alarm', !/SleepService/.test(adb('shell dumpsys activity services com.mildsolvent.slowwave')));
+  adb('shell input keyevent 224'); await sleep(1000); adb('shell input keyevent 82');
+  await p.evaluate(() => { document.getElementById('morning-skip').click(); });
+
+  // an alarm nobody stops gives up by itself
+  const nr2 = await p.evaluate(c => Engine.start(Object.assign({}, c, { napDelayMin: 0, napMin: 0.3, alarmMin: 0.25 })), nc);
+  while (Date.now() < nr2.plan.end + 4000) await sleep(1000);
+  const ln2 = await p.evaluate(() => Engine.peekLastSession());
+  check('unanswered alarm stops itself', ln2 && ln2.endedBy === 'done' && (await p.evaluate(() => Engine.status())).state === 'idle', ln2 && ln2.endedBy);
   await p.evaluate(() => { document.getElementById('morning-skip').click(); });
 
   const allErrs = errs === p.errs ? errs : errs.concat(p.errs); check('no JS errors', allErrs.length === 0, allErrs.join(' | '));

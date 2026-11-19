@@ -1,5 +1,6 @@
 package com.mildsolvent.slowwave;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -20,53 +21,87 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.text.DateFormat;
+import java.util.Calendar;
 import java.util.Date;
 
 /**
- * Plays one night: optional fading pink hiss while falling asleep, then soft 50 ms pink noise
- * bursts in the burst window, then stops itself. Runs as a foreground media service with a
- * partial wake lock so it keeps going with the screen off.
+ * Plays one session (a night or a nap): optional fading pink hiss while falling asleep, then soft
+ * 50 ms pink noise bursts in the burst window, then silence. If the session has an alarm, a real
+ * Android alarm clock (AlarmManager.setAlarmClock, fires in Doze) starts the wake-up chimes on the
+ * alarm stream; otherwise the service stops itself after the bursts.
  *
- * Timing is driven by the audio sample clock: the thread writes a continuous stream (mostly
- * silence) to an AudioTrack, so every burst lands exactly where the plan says.
+ * Runs as a foreground media service with a partial wake lock while it plays, so it keeps going with
+ * the screen off. Timing is driven by the audio sample clock: the thread writes a continuous stream
+ * (mostly silence) to an AudioTrack, so every burst lands exactly where the plan says.
  */
 public class SleepService extends Service {
     static final String ACTION_STOP = "com.mildsolvent.slowwave.STOP";
+    static final String ACTION_WAKE = "com.mildsolvent.slowwave.WAKE";
     private static final String CHANNEL = "night";
+    private static final String CHANNEL_ALARM = "alarm";
     private static final int NOTIF_ID = 7;
     static final String PREFS = "slowwave";
 
-    // ----- shared night state (one night at a time) -----
+    // ----- shared session state (one at a time) -----
     private static final Object LOCK = new Object();
     private static JSONObject cfg;              // settings from the UI
-    private static long startWall, burstStartWall, burstEndWall;
+    private static long startWall, burstStartWall, burstEndWall, wakeWall, endWall; // wakeWall 0 = no alarm
     private static boolean sham;               // blind test: silent night
     private static volatile boolean running;   // prepared or playing
     private static volatile boolean stopFlag;
     private static volatile int blocks;
     private static volatile long pendingPair = -1; // EEG hook: >=0 means "play a pair now"
-    private static Thread audioThread;
+    private static Thread audioThread, alarmThread;
 
-    /** Called by the Bridge (binder thread). Sets up the night synchronously so status() is right away correct. */
+    /** Called by the Bridge (binder thread). Sets up the session synchronously so status() is right away correct. */
     static JSONObject prepare(Context ctx, JSONObject c) throws JSONException {
         synchronized (LOCK) {
             if (running) finish(ctx, "stopped", System.currentTimeMillis());
             cfg = c;
             startWall = System.currentTimeMillis();
-            burstStartWall = startWall + Math.round(c.optDouble("delayMin", 30) * 60_000L);
-            burstEndWall = burstStartWall + Math.round(c.optDouble("windowMin", 180) * 60_000L);
-            sham = c.optBoolean("blind", false) && Math.random() < 0.5;
+            boolean nap = "nap".equals(c.optString("session", "night"));
+            long bStart = startWall + Math.round((nap ? c.optDouble("napDelayMin", 10) : c.optDouble("delayMin", 30)) * 60_000L);
+            long bEnd, wake = 0;
+            if (nap) {
+                long len = Math.round(c.optDouble("napMin", 30) * 60_000L);
+                wake = bStart + len;
+                bEnd = wake - Math.min(5 * 60_000L, len / 6);
+            } else {
+                bEnd = bStart + Math.round(c.optDouble("windowMin", 180) * 60_000L);
+                if (c.optBoolean("alarmOn", false)) {
+                    wake = nextClock(startWall, c.optString("alarmTime", "09:30"));
+                    bEnd = Math.min(bEnd, wake - 10 * 60_000L);
+                }
+            }
+            if (wake > 0 && bStart > wake) bStart = wake;
+            burstStartWall = bStart;
+            burstEndWall = Math.max(bStart, bEnd);
+            wakeWall = wake;
+            endWall = wake > 0 ? wake + Math.round(c.optDouble("alarmMin", 5) * 60_000L) : burstEndWall;
+            sham = !nap && c.optBoolean("blind", false) && Math.random() < 0.5;
             blocks = 0;
             stopFlag = false;
             running = true;
-            JSONObject active = snapshot("active");
-            prefs(ctx).edit().putString("active", active.toString()).apply();
+            prefs(ctx).edit().putString("active", snapshot("active").toString()).apply();
+            if (wakeWall > 0) scheduleAlarm(ctx, wakeWall);
             return plan();
         }
     }
 
+    /** Next time the clock shows hh:mm, at least a minute from t0. Mirror of SW.nextClock. */
+    static long nextClock(long t0, String hhmm) {
+        int h = 9, m = 30;
+        try { String[] p = hhmm.split(":"); h = Integer.parseInt(p[0].trim()); m = Integer.parseInt(p[1].trim()); } catch (Exception ignored) { }
+        Calendar cal = Calendar.getInstance();
+        cal.setTimeInMillis(t0);
+        cal.set(Calendar.HOUR_OF_DAY, h); cal.set(Calendar.MINUTE, m); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0);
+        if (cal.getTimeInMillis() <= t0 + 60_000L) cal.add(Calendar.DAY_OF_MONTH, 1);
+        return cal.getTimeInMillis();
+    }
+
     static JSONObject plan() throws JSONException {
-        return new JSONObject().put("start", startWall).put("burstStart", burstStartWall).put("burstEnd", burstEndWall);
+        return new JSONObject().put("start", startWall).put("burstStart", burstStartWall).put("burstEnd", burstEndWall)
+                .put("wakeAt", wakeWall > 0 ? (Object) wakeWall : JSONObject.NULL).put("end", endWall);
     }
 
     private static JSONObject snapshot(String endedBy) throws JSONException {
@@ -74,34 +109,78 @@ public class SleepService extends Service {
                 .put("sham", sham).put("endedBy", endedBy).put("platform", "android");
     }
 
-    /** Status for the UI. If the app was killed mid-night, reports it once as interrupted. */
+    private static String stateAt(long t) {
+        if (t >= endWall) return "idle";
+        if (wakeWall > 0 && t >= wakeWall) return "waking";
+        if (t < burstStartWall) return "waiting";
+        if (t < burstEndWall) return "bursting";
+        return "quiet";
+    }
+
+    static boolean isRinging() { return running && wakeWall > 0 && System.currentTimeMillis() >= wakeWall; }
+
+    /** Bring a session back after the process died (e.g. the alarm fires after Android killed us overnight). */
+    private static boolean restore(Context ctx) {
+        synchronized (LOCK) {
+            if (running) return true;
+            String active = prefs(ctx).getString("active", null);
+            if (active == null) return false;
+            try {
+                JSONObject a = new JSONObject(active), p = a.getJSONObject("plan");
+                long end = p.optLong("end", p.optLong("burstEnd", 0)), wake = p.isNull("wakeAt") ? 0 : p.optLong("wakeAt", 0);
+                if (wake <= 0 || System.currentTimeMillis() >= end) return false;
+                cfg = a.getJSONObject("cfg");
+                startWall = a.getLong("start");
+                burstStartWall = p.getLong("burstStart");
+                burstEndWall = p.getLong("burstEnd");
+                wakeWall = wake;
+                endWall = end;
+                sham = a.optBoolean("sham", false);
+                long upto = Math.min(System.currentTimeMillis(), burstEndWall) - burstStartWall;
+                long period = Engine.pattern(cfg.optString("pattern", "rhythm")).periodMs();
+                blocks = sham || upto <= 0 ? 0 : (int) ((upto + period - 1) / period);
+                stopFlag = false;
+                running = true;
+                scheduleAlarm(ctx, wakeWall);
+                return true;
+            } catch (Exception e) { return false; }
+        }
+    }
+
+    /** Status for the UI. If the app was killed mid-session, reports it once as interrupted. */
     static JSONObject status(Context ctx) throws JSONException {
         synchronized (LOCK) {
+            if (!running && prefs(ctx).getString("active", null) != null && restore(ctx)) {
+                try { ctx.startForegroundService(new Intent(ctx, SleepService.class)); } catch (Exception ignored) { }
+            }
             if (running) {
                 long now = System.currentTimeMillis();
-                JSONObject s = new JSONObject().put("plan", plan()).put("cfg", cfg)
-                        .put("state", now < burstStartWall ? "waiting" : "bursting");
+                String st = stateAt(now);
+                if ("idle".equals(st)) st = wakeWall > 0 ? "waking" : "bursting"; // the audio thread is about to finish
+                JSONObject s = new JSONObject().put("plan", plan()).put("cfg", cfg).put("state", st);
                 s.put("blocks", sham ? JSONObject.NULL : blocks);
                 return s;
             }
             String active = prefs(ctx).getString("active", null);
             if (active != null) {
-                // process died during a night: record what we know
+                // process died during a session: record what we know
                 JSONObject a = new JSONObject(active);
                 a.put("end", System.currentTimeMillis()).put("endedBy", "interrupted").put("blocks", 0);
                 prefs(ctx).edit().remove("active").putString("last", a.toString()).apply();
+                cancelAlarm(ctx);
                 return new JSONObject().put("state", "idle").put("interrupted", true);
             }
             return new JSONObject().put("state", "idle");
         }
     }
 
-    /** Ends the night and writes the morning summary. Idempotent. */
+    /** Ends the session and writes the morning summary. Idempotent. */
     static void finish(Context ctx, String endedBy, long at) {
         synchronized (LOCK) {
             if (!running) return;
             running = false;
             stopFlag = true;
+            cancelAlarm(ctx);
             try {
                 JSONObject last = snapshot(endedBy).put("end", at).put("blocks", sham ? 0 : blocks);
                 prefs(ctx).edit().remove("active").putString("last", last.toString()).apply();
@@ -109,8 +188,10 @@ public class SleepService extends Service {
         }
     }
 
+    private static String stopReason() { return isRinging() ? "woke" : "stopped"; }
+
     static void stopNight(Context ctx) {
-        finish(ctx, "stopped", System.currentTimeMillis());
+        finish(ctx, stopReason(), System.currentTimeMillis());
         Intent i = new Intent(ctx, SleepService.class).setAction(ACTION_STOP);
         try { ctx.startService(i); } catch (Exception ignored) { }
     }
@@ -119,6 +200,28 @@ public class SleepService extends Service {
 
     static SharedPreferences prefs(Context ctx) { return ctx.getSharedPreferences(PREFS, MODE_PRIVATE); }
 
+    // ----- alarm clock -----
+    private static PendingIntent wakeIntent(Context ctx) {
+        Intent i = new Intent(ctx, SleepService.class).setAction(ACTION_WAKE);
+        return PendingIntent.getForegroundService(ctx, 2, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    private static void scheduleAlarm(Context ctx, long at) {
+        AlarmManager am = ctx.getSystemService(AlarmManager.class);
+        PendingIntent show = PendingIntent.getActivity(ctx, 3, new Intent(ctx, MainActivity.class),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        try {
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(at, show), wakeIntent(ctx));
+        } catch (SecurityException e) {
+            // exact alarms not allowed: still wake up, maybe a little late
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, wakeIntent(ctx));
+        }
+    }
+
+    private static void cancelAlarm(Context ctx) {
+        try { ctx.getSystemService(AlarmManager.class).cancel(wakeIntent(ctx)); } catch (Exception ignored) { }
+    }
+
     // ----- service -----
     private PowerManager.WakeLock wakeLock;
 
@@ -126,23 +229,63 @@ public class SleepService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForegroundCompat();
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            finish(this, "stopped", System.currentTimeMillis());
+        String action = intent != null ? intent.getAction() : null;
+        if (ACTION_WAKE.equals(action) && !running) restore(this);
+        startForegroundCompat(ACTION_WAKE.equals(action) || isRinging());
+        if (ACTION_STOP.equals(action)) {
+            finish(this, stopReason(), System.currentTimeMillis());
             shutdown();
             return START_NOT_STICKY;
         }
         if (!running) { shutdown(); return START_NOT_STICKY; }
-        long total = burstEndWall - System.currentTimeMillis() + 10 * 60_000L;
+        long now = System.currentTimeMillis();
+        if (ACTION_WAKE.equals(action) || isRinging()) {
+            holdWakeLock(endWall - now + 60_000L);
+            if (alarmThread == null || !alarmThread.isAlive()) {
+                alarmThread = new Thread(this::ring, "slowwave-alarm");
+                alarmThread.setPriority(Thread.MAX_PRIORITY);
+                alarmThread.start();
+            }
+        } else if (now < burstEndWall) {
+            holdWakeLock(burstEndWall - now + 10 * 60_000L);
+            if (audioThread == null || !audioThread.isAlive()) {
+                audioThread = new Thread(this::play, "slowwave-audio");
+                audioThread.setPriority(Thread.MAX_PRIORITY);
+                audioThread.start();
+            }
+        }
+        // else: quiet until the alarm; the alarm clock wakes us, no wake lock needed
+        return START_NOT_STICKY;
+    }
+
+    private void holdWakeLock(long ms) {
+        releaseWakeLock();
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "slowwave:night");
-        wakeLock.acquire(Math.max(60_000L, total));
-        if (audioThread == null || !audioThread.isAlive()) {
-            audioThread = new Thread(this::play, "slowwave-audio");
-            audioThread.setPriority(Thread.MAX_PRIORITY);
-            audioThread.start();
-        }
-        return START_NOT_STICKY;
+        wakeLock.acquire(Math.max(60_000L, ms));
+    }
+
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        wakeLock = null;
+    }
+
+    private static AudioTrack makeTrack(boolean alarm, int bufBytes, int mode) {
+        return new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(alarm ? AudioAttributes.USAGE_ALARM : AudioAttributes.USAGE_MEDIA)
+                        .setContentType(alarm ? AudioAttributes.CONTENT_TYPE_SONIFICATION : AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(new AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(Engine.RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                .setBufferSizeInBytes(bufBytes)
+                .setTransferMode(mode).build();
+    }
+
+    private static AudioTrack streamTrack(boolean alarm) {
+        int R = Engine.RATE;
+        int minBuf = AudioTrack.getMinBufferSize(R, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        return makeTrack(alarm, Math.max(minBuf, R / 5 * 2), AudioTrack.MODE_STREAM);
     }
 
     private void play() {
@@ -156,28 +299,20 @@ public class SleepService extends Service {
         final float bGain = Engine.burstGain(c.optInt("volume", 35));
         final boolean lull = c.optBoolean("lull", false);
         final float hGain = Engine.hissGain(c.optInt("lullVol", 30));
-        final long fadeOutN = Math.min(120L * R, burstStartN), fadeInN = 3L * R;
+        final long fadeOutN = Math.min(120L * R, burstStartN), fadeInN = Math.min(3L * R, Math.max(1, burstStartN - fadeOutN));
         final boolean eeg = "eeg".equals(c.optString("mode", "timed"));
 
         float[][] bank = new float[8][];
         for (int k = 0; k < bank.length; k++) bank[k] = Engine.renderBurst();
         Engine.Pink hiss = new Engine.Pink();
 
-        int minBuf = AudioTrack.getMinBufferSize(R, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        AudioTrack track = new AudioTrack.Builder()
-                .setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-                .setAudioFormat(new AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(R).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                .setBufferSizeInBytes(Math.max(minBuf, R / 5 * 2))
-                .setTransferMode(AudioTrack.MODE_STREAM).build();
+        AudioTrack track = streamTrack(false);
         track.play();
 
         final int CH = R / 20; // 50 ms chunks
         short[] buf = new short[CH];
-        long n = 0;
+        // start where the plan is now (0 for a fresh session, later after a restore)
+        long n = Math.max(0, (System.currentTimeMillis() - sStart) * R / 1000) / CH * CH;
         float[] cur = bank[0];
         long pairAt = -1;
         String endedBy = "done";
@@ -223,24 +358,66 @@ public class SleepService extends Service {
             try { track.pause(); track.flush(); track.stop(); } catch (Exception ignored) { }
             track.release();
         }
-        if (!stopFlag) finish(this, endedBy, System.currentTimeMillis());
+        if (stopFlag) { shutdown(); return; }
+        if (wakeWall > 0 && "done".equals(endedBy)) {
+            // bursts are over; stay quiet until the alarm clock fires
+            if (!isRinging()) releaseWakeLock();
+            startForegroundCompat(isRinging());
+            return;
+        }
+        finish(this, endedBy, System.currentTimeMillis());
+        shutdown();
+    }
+
+    /** The wake-up alarm: soft chimes on the alarm stream, getting louder, until stopped or the alarm time runs out. */
+    private void ring() {
+        long wake, end;
+        synchronized (LOCK) { wake = wakeWall; end = endWall; }
+        final int R = Engine.RATE, CH = R / 20;
+        final float[] chime = Engine.renderChime();
+        final long periodN = (long) Engine.CHIME_PERIOD_MS * R / 1000, durN = (end - wake) * R / 1000;
+        long n = Math.max(0, (System.currentTimeMillis() - wake) * R / 1000) / periodN * periodN; // start on a chime
+        AudioTrack track = streamTrack(true);
+        track.play();
+        short[] buf = new short[CH];
+        try {
+            while (!stopFlag && n < durN) {
+                for (int i = 0; i < CH; i++) {
+                    long g = n + i, k = g / periodN, off = g % periodN;
+                    buf[i] = off < chime.length ? Engine.toPcm(chime[(int) off] * Engine.alarmGain(k * Engine.CHIME_PERIOD_MS)) : 0;
+                }
+                if (track.write(buf, 0, CH) < 0) break;
+                n += CH;
+            }
+        } finally {
+            try { track.pause(); track.flush(); track.stop(); } catch (Exception ignored) { }
+            track.release();
+        }
+        if (!stopFlag) finish(this, "done", System.currentTimeMillis());
         shutdown();
     }
 
     private void shutdown() {
-        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        wakeLock = null;
+        releaseWakeLock();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
-    private void startForegroundCompat() {
+    private void startForegroundCompat(boolean ringing) {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm.getNotificationChannel(CHANNEL) == null) {
             NotificationChannel ch = new NotificationChannel(CHANNEL, "Night", NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("Shows while a night is running");
+            ch.setDescription("Shows while a night or nap is running");
             ch.setSound(null, null);
             ch.enableVibration(false);
+            nm.createNotificationChannel(ch);
+        }
+        if (nm.getNotificationChannel(CHANNEL_ALARM) == null) {
+            NotificationChannel ch = new NotificationChannel(CHANNEL_ALARM, "Alarm", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("The wake-up alarm (the app plays its own sound)");
+            ch.setSound(null, null);
+            ch.enableVibration(false);
+            ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             nm.createNotificationChannel(ch);
         }
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
@@ -248,22 +425,37 @@ public class SleepService extends Service {
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, SleepService.class).setAction(ACTION_STOP),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         DateFormat tf = android.text.format.DateFormat.getTimeFormat(this);
-        String text = running ? "Soft bursts " + tf.format(new Date(burstStartWall)) + " to " + tf.format(new Date(burstEndWall)) : "Stopping";
-        Notification n = new Notification.Builder(this, CHANNEL)
+        boolean nap = cfg != null && "nap".equals(cfg.optString("session", "night"));
+        String title, text;
+        if (!running) { title = "Slowwave"; text = "Stopping"; }
+        else if (ringing) { title = "Wake up"; text = "Alarm " + tf.format(new Date(wakeWall)) + " · tap Stop"; }
+        else {
+            title = nap ? "Slowwave nap" : "Slowwave night";
+            text = burstEndWall > burstStartWall
+                    ? "Soft bursts " + tf.format(new Date(burstStartWall)) + " to " + tf.format(new Date(burstEndWall))
+                    : "No bursts";
+            if (wakeWall > 0) text += " · alarm " + tf.format(new Date(wakeWall));
+        }
+        Notification.Builder b = new Notification.Builder(this, ringing ? CHANNEL_ALARM : CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_wave)
-                .setContentTitle("Slowwave night")
+                .setContentTitle(title)
                 .setContentText(text)
                 .setOngoing(true)
                 .setContentIntent(open)
-                .addAction(new Notification.Action.Builder(null, "Stop", stop).build())
-                .build();
+                .addAction(new Notification.Action.Builder(null, ringing ? "Stop alarm" : "Stop", stop).build());
+        if (ringing) {
+            b.setCategory(Notification.CATEGORY_ALARM).setVisibility(Notification.VISIBILITY_PUBLIC)
+                    .setFullScreenIntent(PendingIntent.getActivity(this, 4, new Intent(this, MainActivity.class),
+                            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT), true);
+        }
+        Notification n = b.build();
         if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         else startForeground(NOTIF_ID, n);
     }
 
     @Override
     public void onDestroy() {
-        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        releaseWakeLock();
         super.onDestroy();
     }
 
@@ -280,15 +472,7 @@ public class SleepService extends Service {
                 float[] b = Engine.renderBurst();
                 for (int i = 0; i < b.length; i++) pcm[lead + k * intervalN + i] = Engine.toPcm(b[i] * g);
             }
-            AudioTrack t = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(R).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                    .setBufferSizeInBytes(total * 2)
-                    .setTransferMode(AudioTrack.MODE_STATIC).build();
+            AudioTrack t = makeTrack(false, total * 2, AudioTrack.MODE_STATIC);
             t.write(pcm, 0, total);
             t.play();
             try { Thread.sleep(total * 1000L / R + 300); } catch (InterruptedException ignored) { }

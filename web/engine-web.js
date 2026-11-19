@@ -18,9 +18,41 @@
   function burstGain(v) { return Math.pow(10, (-66 + 0.54 * v) / 20); }
   function hissGain(v) { return Math.pow(10, (-72 + 0.5 * v) / 20); }
 
+  // Next time the clock shows hh:mm, at least a minute after t0.
+  function nextClock(t0, hhmm) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '')) || [0, 9, 30];
+    const d = new Date(t0); d.setHours(+m[1], +m[2], 0, 0);
+    if (d.getTime() <= t0 + 60000) d.setDate(d.getDate() + 1);
+    return d.getTime();
+  }
+  const ALARM_MIN = 5;          // the alarm rings for up to 5 minutes, then gives up
+  const NIGHT_QUIET_MS = 10 * 60000; // bursts stop at least 10 min before a night alarm
+  // Plan of one session. Night: bursts in a window after the fall-asleep delay, optional alarm at a
+  // clock time. Nap: bursts during the nap, alarm when the nap length is up.
   function makePlan(cfg, t0) {
-    const burstStart = t0 + cfg.delayMin * 60000;
-    return { start: t0, burstStart, burstEnd: burstStart + cfg.windowMin * 60000 };
+    const nap = cfg.session === 'nap';
+    let burstStart = t0 + (nap ? (cfg.napDelayMin != null ? cfg.napDelayMin : 10) : cfg.delayMin) * 60000;
+    let burstEnd, wakeAt = null;
+    if (nap) {
+      const len = (cfg.napMin || 30) * 60000;
+      wakeAt = burstStart + len;
+      burstEnd = wakeAt - Math.min(5 * 60000, len / 6);
+    } else {
+      burstEnd = burstStart + cfg.windowMin * 60000;
+      if (cfg.alarmOn) { wakeAt = nextClock(t0, cfg.alarmTime); burstEnd = Math.min(burstEnd, wakeAt - NIGHT_QUIET_MS); }
+    }
+    if (wakeAt != null && burstStart > wakeAt) burstStart = wakeAt;
+    burstEnd = Math.max(burstStart, burstEnd);
+    const end = wakeAt != null ? wakeAt + (cfg.alarmMin || ALARM_MIN) * 60000 : burstEnd;
+    return { start: t0, burstStart, burstEnd, wakeAt, end };
+  }
+  function stateAt(plan, t) {
+    if (plan.end == null) plan.end = plan.burstEnd; // session started by 0.1.0
+    if (t >= plan.end) return 'idle';
+    if (plan.wakeAt != null && t >= plan.wakeAt) return 'waking';
+    if (t < plan.burstStart) return 'waiting';
+    if (t < plan.burstEnd) return 'bursting';
+    return 'quiet';
   }
   function blocksUntil(plan, cfg, t) {
     const p = PATTERNS[cfg.pattern] || PATTERNS.rhythm;
@@ -58,7 +90,25 @@
     return out;
   }
 
-  window.SW = { PATTERNS, BURST_MS, periodMs, burstGain, hissGain, makePlan, blocksUntil, renderBurst, pinkSource };
+  // Alarm: a soft rising four-note chime every 4 s, getting louder over 90 s (-32 to -10 dBFS).
+  const CHIME_PERIOD_MS = 4000;
+  function alarmGain(elapsedMs) { return Math.pow(10, (-32 + 22 * Math.min(1, elapsedMs / 90000)) / 20); }
+  function renderChime(rate) {
+    const notes = [[523.25, 0], [659.25, 0.28], [783.99, 0.56], [1046.5, 0.84]];
+    const n = Math.round(rate * 2.8), out = new Float32Array(n);
+    notes.forEach(([f, at]) => {
+      for (let i = Math.round(at * rate); i < n; i++) {
+        const t = i / rate - at, env = t < 0.008 ? t / 0.008 : Math.exp(-(t - 0.008) / 0.5);
+        out[i] += env * (Math.sin(2 * Math.PI * f * t) + 0.3 * Math.sin(4 * Math.PI * f * t));
+      }
+    });
+    let peak = 1e-9; for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(out[i]));
+    for (let i = 0; i < n; i++) out[i] /= peak;
+    const fade = Math.round(rate * 0.05); for (let i = 0; i < fade; i++) out[n - 1 - i] *= i / fade;
+    return out;
+  }
+
+  window.SW = { PATTERNS, BURST_MS, ALARM_MIN, CHIME_PERIOD_MS, periodMs, burstGain, hissGain, alarmGain, nextClock, makePlan, stateAt, blocksUntil, renderBurst, renderChime, pinkSource };
 
   /* ---------- browser engine ----------
    * Everything for the night is scheduled up front on the AudioContext clock, so nothing in
@@ -156,7 +206,7 @@
       const c = ensureCtx();
       teardown();
       const t0 = Date.now(), plan = makePlan(cfg, t0);
-      const sham = cfg.blind ? Math.random() < 0.5 : false;
+      const sham = cfg.blind && cfg.session !== 'nap' ? Math.random() < 0.5 : false;
       const p = PATTERNS[cfg.pattern] || PATTERNS.rhythm;
       const c0 = c.currentTime + 0.1;
       const toCtx = ms => c0 + (ms - t0) / 1000;
@@ -164,13 +214,14 @@
       if (cfg.lull) {
         const g = c.createGain(), src = c.createBufferSource();
         src.buffer = hissBuffer(c); src.loop = true;
-        const fadeStart = Math.max(c0, toCtx(plan.burstStart) - 120);
+        const hissEnd = Math.max(c0 + 1, toCtx(plan.burstStart));
+        const fadeStart = Math.max(c0, hissEnd - 120), top = Math.min(c0 + 3, fadeStart);
         g.gain.setValueAtTime(0, c0);
-        g.gain.linearRampToValueAtTime(hissGain(cfg.lullVol), c0 + 3);
+        g.gain.linearRampToValueAtTime(hissGain(cfg.lullVol), top);
         g.gain.setValueAtTime(hissGain(cfg.lullVol), fadeStart);
-        g.gain.linearRampToValueAtTime(0, toCtx(plan.burstStart));
+        g.gain.linearRampToValueAtTime(0, hissEnd);
         src.connect(g).connect(c.destination);
-        src.start(c0); src.stop(toCtx(plan.burstStart) + 1);
+        src.start(c0); src.stop(hissEnd + 1);
         nodes.push(src);
       }
       if (!sham) {
@@ -179,6 +230,16 @@
         out.connect(c.destination);
         const bufs = buffersFor(c), per = periodMs(p);
         for (let t = plan.burstStart; t < plan.burstEnd; t += per) scheduleBlock(c, bufs, toCtx(t), 1, p, out);
+      }
+      if (plan.wakeAt != null) {
+        const data = renderChime(c.sampleRate);
+        const cb = c.createBuffer(1, data.length, c.sampleRate); cb.getChannelData(0).set(data);
+        for (let t = plan.wakeAt; t < plan.end; t += CHIME_PERIOD_MS) {
+          const g = c.createGain(), s = c.createBufferSource();
+          g.gain.value = alarmGain(t - plan.wakeAt);
+          s.buffer = cb; s.connect(g).connect(c.destination); s.start(toCtx(t));
+          nodes.push(s);
+        }
       }
       startSilentKeepAlive();
       if (cfg.keepScreen) lockScreen(true);
@@ -190,15 +251,16 @@
     stop() {
       const sess = load(KEY);
       teardown();
-      if (sess) finish(sess, 'stopped', Date.now());
+      if (sess) finish(sess, stateAt(sess.plan, Date.now()) === 'waking' ? 'woke' : 'stopped', Date.now());
     },
     status() {
       const sess = load(KEY);
       if (!sess) return { state: 'idle' };
       const now = Date.now();
+      if (sess.plan.end == null) sess.plan.end = sess.plan.burstEnd;
       if (!ctx || !nodes.length && !sess.sham) {
         // page was reloaded / killed: the scheduled sound is gone
-        if (now < sess.plan.burstEnd) { sess.pausedAt = sess.pausedAt || now; }
+        if (now < sess.plan.end) { sess.pausedAt = sess.pausedAt || now; }
         store(KEY, sess); teardown(); finish(sess, 'interrupted', now);
         return { state: 'idle', interrupted: true };
       }
@@ -207,8 +269,8 @@
       if (!sess.pausedAt && wallElapsed - audioElapsed > 20000) {
         sess.pausedAt = sess.wallStart + audioElapsed; store(KEY, sess);
       }
-      if (now >= sess.plan.burstEnd) { teardown(); finish(sess, 'done', sess.plan.burstEnd); return { state: 'idle', justFinished: true }; }
-      const state = now < sess.plan.burstStart ? 'waiting' : 'bursting';
+      const state = stateAt(sess.plan, now);
+      if (state === 'idle') { teardown(); finish(sess, 'done', sess.plan.end); return { state: 'idle', justFinished: true }; }
       return { state, plan: sess.plan, cfg: sess.cfg, blocks: sess.sham ? null : blocksUntil(sess.plan, sess.cfg, now), pausedAt: sess.pausedAt || null };
     },
     test(cfg) {
