@@ -134,7 +134,7 @@ async function waitReady(p) {
   await sleep(1500);
   const ln = await p.evaluate(() => Engine.peekLastSession());
   check('stopping the alarm records woke', ln && ln.endedBy === 'woke', ln && ln.endedBy);
-  check('alarm clock cleared', !/slowwave\.WAKE/.test(adb('shell dumpsys alarm')));
+  check('alarm clock cleared', !/slowwave\.WAKE/.test(pendingAlarms()));
   check('service gone after alarm', !/SleepService/.test(adb('shell dumpsys activity services com.mildsolvent.slowwave')));
   adb('shell input keyevent 224'); await sleep(1000); adb('shell input keyevent 82');
   await p.evaluate(() => { document.getElementById('morning-skip').click(); });
